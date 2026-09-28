@@ -23,4 +23,14 @@
 - Added root-level empty `conftest.py` so `tests/` can import the `src`
   package without an `__init__.py` in `tests/`.
 
-Next: run `check_env.py` and `pytest -q`, fix any issues, commit Phase 0.
+- Verified: `check_env.py` exits 0 (mteb 2.21.8, sentence-transformers 6.1.0,
+  torch 2.14.0, numpy 2.4.6, pandas 3.0.6; all three required imports OK;
+  `AppsRetrieval` task metadata loads without downloading the full dataset).
+- Verified: `pytest -q` passes (1 test).
+- Committed as `d509264` — "Phase 0: project skeleton, env check, metrics
+  logger".
+
+**Phase 0: verified and committed.**
+
+Next: await approval to start Phase 1 (baseline encoder + first
+`appsretrieval_results.json` submission).
