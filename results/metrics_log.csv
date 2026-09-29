@@ -1,0 +1,2 @@
+timestamp,experiment_id,model,pipeline_config,ndcg_at_10,mrr,num_queries,corpus_size,encode_seconds,seconds_per_1k_docs,git_commit,notes
+2026-09-29T11:29:12.544861+00:00,phase1_minilm_l6_v2,sentence-transformers/all-MiniLM-L6-v2,configs/minilm_l6_v2.json,0.06596,0.055810409157022685,3765,8765,80.74445525021292,9.21214549346411,3f12a4f,"task=AppsRetrieval, main_score=0.06596"

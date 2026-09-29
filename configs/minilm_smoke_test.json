@@ -1,0 +1,10 @@
+{
+    "model_name": "sentence-transformers/all-MiniLM-L6-v2",
+    "query_prefix": "",
+    "document_prefix": "",
+    "max_seq_length": 256,
+    "batch_size": 8,
+    "trust_remote_code": false,
+    "cache_embeddings": false,
+    "cache_dir": ".cache/embeddings"
+}
