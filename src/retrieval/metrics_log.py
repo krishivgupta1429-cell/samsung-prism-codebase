@@ -14,6 +14,7 @@ HEADER = [
     "corpus_size",
     "encode_seconds",
     "seconds_per_1k_docs",
+    "device",
     "git_commit",
     "notes",
 ]
@@ -41,6 +42,7 @@ def log_run(
     num_queries,
     corpus_size,
     encode_seconds,
+    device="",
     notes="",
     path="results/metrics_log.csv",
 ):
@@ -63,6 +65,7 @@ def log_run(
         "corpus_size": corpus_size,
         "encode_seconds": encode_seconds,
         "seconds_per_1k_docs": seconds_per_1k_docs,
+        "device": device,
         "git_commit": _git_commit(),
         "notes": notes,
     }

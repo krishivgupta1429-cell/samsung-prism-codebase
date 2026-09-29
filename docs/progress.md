@@ -222,5 +222,85 @@ testing for `SFR-Embedding-Code-400M_R`, `granite-embedding-english-r2`,
 and `jina-code-embeddings-0.5b` is continuing on a separate RTX 4090
 machine.
 
-Next: awaiting results from the RTX 4090 machine, or further direction on
-this machine in the meantime.
+## Phase 1 (continued): CUDA runs on RTX 4050 laptop, new leader found
+
+- Picked up on a different machine (Windows laptop). Note: the machine
+  actually has an **RTX 4050 Laptop GPU (6GB VRAM)**, not the RTX 4090
+  mentioned at the start of this session — confirmed via `nvidia-smi`
+  (driver 592.82, CUDA 13.1) and flagged to the user, who confirmed to
+  proceed on the 4050.
+- Created a fresh `.venv` (Python 3.14.6, the only interpreter on this
+  machine) and installed `requirements.txt`, which brings in CPU-only
+  `torch==2.14.0` by default. Replaced it with the matching CUDA build,
+  `torch==2.14.0+cu130` (from `download.pytorch.org/whl/cu130` — the
+  `cu126`/`cu130` indexes were the only ones with a `2.14.0` wheel for
+  `cp314`; `cu128`/`cu124`/`cu121` did not have both), via
+  `pip install --force-reinstall --no-deps` (plain `pip install` no-ops
+  since pip considers a same-version CPU wheel as already satisfying a
+  CUDA-tagged requirement). `torch.cuda.is_available()` confirmed `True`,
+  device name "NVIDIA GeForce RTX 4050 Laptop GPU". `check_env.py` and
+  `pytest -q` both pass (2 passed) before touching any model, as required.
+- Added a `device` column to `results/metrics_log.csv` / `log_run()` /
+  `experiments/run_eval.py` (previously device was only recorded in the
+  free-text `notes` field, per the prior session's note that there was "no
+  separate device column"). Backfilled the two pre-existing CPU rows
+  (`all-MiniLM-L6-v2`, `e5-base-v2`) with `device=cpu`.
+- **`ibm-granite/granite-embedding-english-r2` → OK on CUDA.** Same
+  ModernBERT architecture that timed out after 1200s on CPU on a prior
+  machine. Timing check (200-doc sample): projected 905s (~15 min), well
+  under the 30-minute threshold. Full run: **NDCG@10 0.13993, MRR@10
+  0.11960**, encode_seconds 751.33 (device=cuda). GPU memory during the run
+  peaked around 5.9/6.1GB — tight on the 4050's 6GB but did not OOM.
+- **`jinaai/jina-code-embeddings-0.5b` → OK on CUDA.** Projected ~13.5
+  hours on CPU on a prior machine; on CUDA the timing check projected
+  1111.5s (~18.5 min), also under threshold. Full run: **NDCG@10 0.84083,
+  MRR@10 0.81055**, encode_seconds 1431.18 (device=cuda) — the actual run
+  took about 1.3x the doc-only projection, consistent with queries
+  averaging longer than documents (same pattern seen with `e5-base-v2`
+  earlier). Sanity-checked `results/jina_code_embeddings_0_5b/
+  appsretrieval_results.json` directly: `ndcg_at_1` (0.74104) <
+  `ndcg_at_10` (0.84083) < `ndcg_at_100` (0.85213), `recall_at_10` (0.9344)
+  < `recall_at_100` (0.98566) — monotonic, non-degenerate. This is a large
+  jump over every other candidate (next best 0.13993), which is plausible
+  here: it's a code-specific model using its own `nl2code_query`/
+  `nl2code_document` prompt templates (already wired up in
+  `configs/jina_code_embeddings_0_5b.json` from the earlier candidate
+  comparison), unlike the generic BERT-family encoders. **New leader.**
+- **`Salesforce/SFR-Embedding-Code-400M_R` → OK on CUDA**, resuming the
+  test that was stopped mid-run on a different machine before completing.
+  Its remote code (from `Alibaba-NLP/new-impl`, loaded via
+  `trust_remote_code=True`) previously required `transformers==4.45.1` (an
+  older-than-`requirements.txt` version) — but `transformers==4.45.1`'s
+  pinned `tokenizers<0.21` has no prebuilt wheel for Python 3.14, so used
+  `transformers==4.49.0` instead (top of the user-approved ~4.45–4.49
+  range; dry-run confirmed it resolves cleanly to `tokenizers==0.21.4`,
+  which does have a `cp314`-compatible wheel). Built an isolated
+  `.venv-sfr-test/` (`transformers==4.49.0`, `sentence-transformers==3.4.1`,
+  `mteb==2.21.8`, then the same CUDA `torch==2.14.0+cu130` swap as the main
+  venv) — main `.venv` untouched throughout. Timing check: projected
+  1204.2s (~20 min), under threshold. Full run: **NDCG@10 0.49627, MRR@10
+  0.44957**, encode_seconds 1721.35 (device=cuda, dtype=bfloat16).
+  Sanity-checked the results file: `ndcg_at_1` (0.36042) < `ndcg_at_10`
+  (0.49627) < `ndcg_at_100` (0.54178) — monotonic, non-degenerate. Second
+  place overall.
+- All three models ran one at a time (never concurrently) to avoid
+  contending for the 4050's 6GB VRAM.
+- `results/metrics_log.csv` and `results/model_comparison.md` updated with
+  all three results (device=cuda for all three). `pytest -q`: 2 passed
+  (re-verified after the `device` column change).
+
+**New leader: `jinaai/jina-code-embeddings-0.5b`, NDCG@10=0.84083** — about
+6x the previous leader (`e5-base-v2`, 0.11523) and 7.3x further above the
+`all-MiniLM-L6-v2` baseline (0.06596. `Salesforce/SFR-Embedding-Code-400M_R`
+is a clear second (0.49627). Every candidate attempted on CPU that failed or
+was skipped for speed reasons (`granite-embedding-english-r2`,
+`jina-code-embeddings-0.5b`, and previously the CPU-crashing
+`SFR-Embedding-Code-400M_R`) ran successfully once moved to CUDA, so GPU
+availability — not architecture — was the real blocker for those models on
+this benchmark.
+
+Next: no further candidates queued. Possible follow-ups: re-run
+`gte-modernbert-base` (the original Phase 1 CPU casualty) on this GPU now
+that ModernBERT-family CPU slowness is moot; try other purpose-built code
+embedding models; or move to Phase 2 (query cleaning / hybrid search /
+reranking) on top of the new `jina-code-embeddings-0.5b` leader.

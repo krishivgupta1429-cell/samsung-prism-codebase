@@ -62,6 +62,7 @@ def main():
         num_queries=num_queries,
         corpus_size=corpus_size,
         encode_seconds=encode_seconds,
+        device=encoder.device,
         notes=f"task={task_result.task_name}, main_score={scores['main_score']}, {device_note}",
     )
 
