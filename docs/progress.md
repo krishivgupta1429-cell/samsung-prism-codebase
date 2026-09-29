@@ -299,8 +299,54 @@ was skipped for speed reasons (`granite-embedding-english-r2`,
 availability — not architecture — was the real blocker for those models on
 this benchmark.
 
-Next: no further candidates queued. Possible follow-ups: re-run
-`gte-modernbert-base` (the original Phase 1 CPU casualty) on this GPU now
-that ModernBERT-family CPU slowness is moot; try other purpose-built code
-embedding models; or move to Phase 2 (query cleaning / hybrid search /
-reranking) on top of the new `jina-code-embeddings-0.5b` leader.
+## Phase 1: formal winner decision — `jina-code-embeddings-0.5b`
+
+Before formally selecting a winner, confirmed exactly how corpus vs. query
+encoding is handled, since that determines whether jina's slow CPU
+corpus-encoding time conflicts with the problem statement's "CPU-friendly,
+minimal GPU" requirement.
+
+**Confirmed via MTEB's own source** (`mteb/_evaluators/retrieval_evaluator.py`,
+`RetrievalEvaluator.__call__`): the evaluator is structured as two distinct
+phases — `search_model.index(corpus=...)`, timed as `"Encoding corpus"`, then
+`search_model.search(queries=...)`, timed as `"Encoding queries"`. The code
+explicitly branches on whether the search backend has a persistent
+`index_backend`: with one, corpus encoding happens once during indexing and
+only queries are re-encoded per search; without one (our current setup —
+a plain encoder, no vector index in front of it), the two get fused into a
+single measurement, which is exactly what our logged `encode_seconds` numbers
+reflect (corpus + queries combined, in one `mteb.evaluate()` call).
+
+This matches this project's own stated design intent from the original Phase 1
+brief for `src/retrieval/encoder.py`'s on-disk embedding cache
+(`.cache/embeddings/`): "reuse cached embeddings **to avoid re-encoding the
+corpus**." The whole point of that cache is that corpus encoding is meant to
+be a one-time (or occasional, on corpus change) offline step — also this
+project's stated P1 goal ("fast index rebuilds when code changes") — while
+query encoding is the per-request, online cost that actually needs to be fast.
+
+**Conclusion: confirmed.** Corpus encoding is architecturally a one-time
+indexing cost that can reasonably use a GPU without violating the spirit of
+"CPU-friendly, minimal GPU" — that requirement is about the serving/query
+path, not the one-time index build. jina-code-embeddings-0.5b's slow CPU
+corpus-encoding time (~13.5h projected) is therefore not by itself
+disqualifying.
+
+**Open caveat, not yet closed out:** we have not directly measured
+jina-code-embeddings-0.5b's single-query CPU encoding latency in isolation —
+every CPU timing check so far (`scripts/time_encode.py`) sampled documents
+from the corpus, never queries. The architectural argument for compliance is
+sound, but a concrete query-only CPU latency number is still a recommended
+follow-up before calling CPU-side compliance fully proven end-to-end.
+
+**Formal decision: `jinaai/jina-code-embeddings-0.5b` is the Phase 1 winner.**
+NDCG@10 0.84083 / MRR@10 0.81055 — a dramatic, non-degenerate improvement
+(6x the previous leader, 12.7x the baseline) driven by code-specific
+pretraining, which none of the general-purpose text encoders tried in Phase 1
+(MiniLM, e5-base-v2, granite) can match regardless of device. `README.md`
+updated to reflect this as the current model and to state the corpus/query
+reasoning and its open caveat.
+
+Next: awaiting direction on Phase 2/3 (query cleaning, hybrid search,
+reranking) built on top of `jina-code-embeddings-0.5b`, or on closing out the
+single-query CPU latency follow-up first.
