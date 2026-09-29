@@ -107,7 +107,70 @@ different machine/GPU, or after investigating the specific CPU slowdown
 further — since a code-pretrained model should meaningfully outperform a
 general-purpose MiniLM on this task.
 
-Next: await direction on whether to (a) try the other candidate models
-(`granite-embedding-english-r2`, `e5-base-v2`, `jina-code-embeddings-0.5b`)
-against this same baseline, (b) revisit `gte-modernbert-base`'s CPU
-slowness, or (c) move to Phase 2 error analysis on the MiniLM baseline.
+## Phase 1 (continued): candidate model comparison
+
+- Installed `hf_transfer` and initially set `HF_HUB_ENABLE_HF_TRANSFER=1` as
+  requested, but discovered it's a no-op in the installed `huggingface_hub`
+  version — downloads always go through its Xet backend now, and that env
+  var only triggers a deprecation warning. Xet stalled indefinitely on this
+  machine (as it did for `gte-modernbert-base` earlier), so
+  `experiments/run_all_candidates.py` forces `HF_HUB_DISABLE_XET=1` instead,
+  which was confirmed reliable in the earlier Phase 1 baseline work.
+- Confirmed all three candidate model IDs exist on the Hub and none require
+  `trust_remote_code` (checked each `config.json` for `auto_map`):
+  `jinaai/jina-code-embeddings-0.5b`, `ibm-granite/granite-embedding-english-r2`,
+  `intfloat/e5-base-v2`. All three ship `modules.json`, so they load directly
+  through our existing `SentenceTransformer`-based encoder.
+  - `jina-code-embeddings-0.5b` uses named prompts rather than simple
+    prefixes; used its `nl2code_query`/`nl2code_document` prompt strings
+    (the closest match to natural-language-query → code-snippet retrieval)
+    as our `query_prefix`/`document_prefix`.
+  - `granite-embedding-english-r2` is **also `ModernBertModel`-architected**
+    (`configs/granite_embedding_english_r2.json`), same family as the
+    already-broken `gte-modernbert-base`.
+  - `e5-base-v2` uses the standard `BertModel` architecture and needs
+    `"query: "`/`"passage: "` prefixes (set in its config, per the brief).
+- Wrote `experiments/run_all_candidates.py`: runs each candidate in its own
+  subprocess (real OS-level isolation, not just non-concurrency — needed
+  after seeing one CPU-bound model's memory climb past 1.5GB earlier),
+  strictly one at a time. Reuses `scripts/time_encode.py` for a 200-doc
+  timing projection and `experiments/run_eval.py` for the full evaluation.
+  Skips a model automatically if the projected full-corpus time exceeds 20
+  minutes, retries once on any failure before giving up, and always
+  continues to the next candidate rather than stopping the whole run.
+  Updated `experiments/run_eval.py` to read `batch_size` from each model's
+  own config instead of a hardcoded 64, since candidates have very
+  different memory footprints.
+- Results:
+  - **`ibm-granite/granite-embedding-english-r2` → FAILED.** Timed out
+    (1200s) on both the initial timing-check attempt and its retry. This is
+    almost certainly the same ModernBERT CPU-inference slowdown diagnosed
+    for `gte-modernbert-base` — same architecture family.
+  - **`jinaai/jina-code-embeddings-0.5b` → SKIPPED.** First timing-check
+    attempt timed out (slow download); the retry succeeded and measured a
+    projected full-corpus time of **48,726s (~13.5 hours)** — this 0.5B
+    decoder-style (Qwen2) model is also impractically slow for CPU
+    inference on this machine.
+  - **`intfloat/e5-base-v2` → OK.** NDCG@10 **0.11523**, MRR@10 **0.09878**,
+    encode_seconds 787.74 (actual full run — docs + queries — ran longer
+    than the docs-only 531.2s projection, expected since queries average
+    longer than documents on APPS and the projection only samples the
+    corpus). Sanity-checked `results/e5_base_v2/appsretrieval_results.json`
+    directly: `ndcg_at_1` (0.073) < `ndcg_at_10` (0.115) < `ndcg_at_100`
+    (0.150), `recall_at_10` (0.169) < `recall_at_100` (0.343) — monotonic
+    and non-degenerate, not a silent all-zero/identical-score bug.
+- `results/model_comparison.md` written, sorted by NDCG@10 descending:
+  `e5-base-v2` (0.11523) > `all-MiniLM-L6-v2` (0.06596, baseline) >
+  `jina-code-embeddings-0.5b` (skipped) > `granite-embedding-english-r2`
+  (failed).
+- `pytest -q`: 2 passed.
+
+**Current leader: `intfloat/e5-base-v2`, NDCG@10=0.11523 — roughly 1.75x the
+`all-MiniLM-L6-v2` baseline's 0.06596.** Every candidate with a ModernBERT or
+large-decoder architecture has now failed or been skipped for CPU-speed
+reasons on this machine; the two working, reasonably fast models so far are
+both standard BERT-family encoders (MiniLM, e5-base-v2).
+
+Next: awaiting direction — sanity-check requested before building further on
+`e5-base-v2`, then likely Phase 2 error analysis or trying additional
+BERT-family candidates.

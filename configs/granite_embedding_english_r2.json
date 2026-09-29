@@ -1,0 +1,10 @@
+{
+    "model_name": "ibm-granite/granite-embedding-english-r2",
+    "query_prefix": "",
+    "document_prefix": "",
+    "max_seq_length": 2048,
+    "batch_size": 64,
+    "trust_remote_code": false,
+    "cache_embeddings": false,
+    "cache_dir": ".cache/embeddings"
+}

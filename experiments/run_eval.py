@@ -27,8 +27,10 @@ def main():
     task = mteb.get_task("AppsRetrieval")
     task.load_data()
 
+    batch_size = config.get("batch_size", 64)
+
     start = time.monotonic()
-    result = mteb.evaluate(encoder, [task], encode_kwargs={"batch_size": 64})
+    result = mteb.evaluate(encoder, [task], encode_kwargs={"batch_size": batch_size})
     encode_seconds = time.monotonic() - start
 
     task_result = list(result.task_results)[0]
