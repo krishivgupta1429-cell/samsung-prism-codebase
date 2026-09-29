@@ -171,6 +171,56 @@ large-decoder architecture has now failed or been skipped for CPU-speed
 reasons on this machine; the two working, reasonably fast models so far are
 both standard BERT-family encoders (MiniLM, e5-base-v2).
 
-Next: awaiting direction — sanity-check requested before building further on
-`e5-base-v2`, then likely Phase 2 error analysis or trying additional
-BERT-family candidates.
+## Phase 1 (continued): GPU support added, SFR-Embedding-Code attempted
+
+- Added MPS/CUDA device support to `src/retrieval/encoder.py`: device
+  selection now tries CUDA, then Apple MPS, then CPU (`select_device()`),
+  and a config `"dtype"` field is resolved through `resolve_dtype()`, which
+  downgrades a requested `bfloat16` to `float16` on MPS specifically (MPS's
+  bf16 support is incomplete/unstable). `run_eval.py`/`time_encode.py` now
+  print `device=..., dtype=...` for every run and include it in the
+  `metrics_log.csv` notes field going forward. On this machine (MacBook Air
+  M4, no CUDA), device auto-selects to `mps`.
+- New candidate `Salesforce/SFR-Embedding-Code-400M_R` needs
+  `trust_remote_code=True` (approved by user) — its `NewModel` architecture
+  is loaded from a separate `Alibaba-NLP/new-impl` repo's custom code, not
+  from Salesforce's own repo. First attempt crashed on MPS: the remote
+  code's `self.get_extended_attention_mask(...)` call doesn't exist in our
+  installed `transformers==5.17.0` (the code was written for `4.45.1`,
+  per the model's `config.json`) — a real version incompatibility, not
+  MPS-specific (would raise the same `AttributeError` on CPU too, just
+  without the fatal Metal-kernel-level crash MPS produced).
+- Per user's direction, built an isolated `.venv-sfr-test/` (fully separate
+  from the main `.venv`, never touched it) with `transformers==4.45.1`,
+  `sentence-transformers==3.4.1`, `mteb==2.21.8`, `torch==2.14.0` — verified
+  no dependency conflicts (mteb only needs `sentence_transformers>=3.0.0`,
+  and our own encoder never touches mteb's built-in
+  `SentenceTransformerEncoderWrapper`, so the older sentence-transformers is
+  safe). In that isolated env, the model loaded and ran successfully:
+  `device=mps, dtype=float16`, 64-doc timing sample → **projected 2,586.6s
+  (~43.1 min) for the full corpus** — over the 30-minute threshold but
+  approved to proceed anyway.
+- **Stopped mid-run per user instruction** (moving further GPU testing to a
+  separate RTX 4090 machine for speed/reliability) before the full eval
+  completed. No result was ever logged — the process was killed before
+  reaching `log_run()`/writing `appsretrieval_results.json`, so
+  `results/metrics_log.csv` and `results/model_comparison.md` needed no
+  cleanup; there was nothing partial to remove.
+- Cleanup performed: `.venv-sfr-test/` deleted entirely. Confirmed the main
+  `.venv` is untouched — `transformers==5.17.0` (unchanged), `check_env.py`
+  exits 0, `pytest -q` passes (2 passed).
+- **Note:** `results/metrics_log.csv`'s two completed rows
+  (`all-MiniLM-L6-v2`, `e5-base-v2`) predate the device-tracking change
+  above and do not record which device they ran on (both ran on CPU, since
+  that was hardcoded before this session). There is no separate "device"
+  column in either `metrics_log.csv` or `model_comparison.md` — device info
+  is only appended into the free-text `notes` field, and only for runs
+  after this change (none logged yet).
+
+**Current leader remains `intfloat/e5-base-v2`, NDCG@10=0.11523.** GPU
+testing for `SFR-Embedding-Code-400M_R`, `granite-embedding-english-r2`,
+and `jina-code-embeddings-0.5b` is continuing on a separate RTX 4090
+machine.
+
+Next: awaiting results from the RTX 4090 machine, or further direction on
+this machine in the meantime.

@@ -24,6 +24,11 @@ def main():
     model_slug = Path(args.config).stem
 
     encoder = PrePostPipelineEncoder(args.config)
+    device_note = f"device={encoder.device}"
+    if encoder.dtype_used:
+        device_note += f", dtype={encoder.dtype_used}"
+    print(device_note)
+
     task = mteb.get_task("AppsRetrieval")
     task.load_data()
 
@@ -57,7 +62,7 @@ def main():
         num_queries=num_queries,
         corpus_size=corpus_size,
         encode_seconds=encode_seconds,
-        notes=f"task={task_result.task_name}, main_score={scores['main_score']}",
+        notes=f"task={task_result.task_name}, main_score={scores['main_score']}, {device_note}",
     )
 
     print(f"Wrote {output_path}")

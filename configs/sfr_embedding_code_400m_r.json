@@ -1,0 +1,11 @@
+{
+    "model_name": "Salesforce/SFR-Embedding-Code-400M_R",
+    "query_prefix": "",
+    "document_prefix": "",
+    "max_seq_length": 2048,
+    "batch_size": 32,
+    "trust_remote_code": true,
+    "dtype": "bfloat16",
+    "cache_embeddings": false,
+    "cache_dir": ".cache/embeddings"
+}

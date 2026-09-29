@@ -15,9 +15,14 @@ SAMPLE_SIZE = 200
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="configs/gte_modernbert_base.json")
+    parser.add_argument("--sample-size", type=int, default=SAMPLE_SIZE)
     args = parser.parse_args()
 
     encoder = PrePostPipelineEncoder(args.config)
+    device_note = f"device={encoder.device}"
+    if encoder.dtype_used:
+        device_note += f", dtype={encoder.dtype_used}"
+    print(device_note)
 
     task = mteb.get_task("AppsRetrieval")
     task.load_data()
@@ -25,7 +30,7 @@ def main():
     corpus = task.dataset["default"]["test"]["corpus"]
     corpus_size = len(corpus)
 
-    sample_size = min(SAMPLE_SIZE, corpus_size)
+    sample_size = min(args.sample_size, corpus_size)
     sample_texts = corpus["text"][:sample_size]
 
     processed = [

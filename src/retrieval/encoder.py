@@ -13,10 +13,49 @@ from mteb.types import PromptType
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    import torch
     from torch.utils.data import DataLoader
 
     from mteb.abstasks.task_metadata import TaskMetadata
     from mteb.types import Array, BatchedInput, EncodeKwargs
+
+
+def select_device() -> str:
+    """Pick the best available device: CUDA, then Apple MPS, then CPU."""
+    import torch
+
+    if torch.cuda.is_available():
+        return "cuda"
+    if torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+
+def resolve_dtype(dtype_name: str | None, device: str) -> tuple["torch.dtype | None", str | None]:
+    """Map a config dtype name to a torch dtype, avoiding bf16 on MPS.
+
+    PyTorch's MPS backend has incomplete/unstable bfloat16 support, so a
+    bfloat16 request is downgraded to float16 on that device. Returns
+    (torch_dtype_or_None, actual_dtype_name_used_or_None).
+    """
+    if dtype_name is None:
+        return None, None
+
+    import torch
+
+    dtype_map = {
+        "float32": torch.float32,
+        "float16": torch.float16,
+        "bfloat16": torch.bfloat16,
+    }
+    dtype = dtype_map[dtype_name]
+    actual_name = dtype_name
+
+    if device == "mps" and dtype is torch.bfloat16:
+        dtype = torch.float16
+        actual_name = "float16"
+
+    return dtype, actual_name
 
 
 class PrePostPipelineEncoder(AbsEncoder):
@@ -41,12 +80,18 @@ class PrePostPipelineEncoder(AbsEncoder):
         self.cache_embeddings: bool = config.get("cache_embeddings", False)
         self.cache_dir = Path(config.get("cache_dir", ".cache/embeddings"))
 
+        self.device: str = config.get("device") or select_device()
+        torch_dtype, self.dtype_used = resolve_dtype(config.get("dtype"), self.device)
+
         from sentence_transformers import SentenceTransformer
+
+        model_kwargs = {"torch_dtype": torch_dtype} if torch_dtype is not None else None
 
         self.model = SentenceTransformer(
             self.model_name,
-            device="cpu",
+            device=self.device,
             trust_remote_code=self.trust_remote_code,
+            model_kwargs=model_kwargs,
         )
         if self.max_seq_length is not None:
             self.model.max_seq_length = self.max_seq_length
