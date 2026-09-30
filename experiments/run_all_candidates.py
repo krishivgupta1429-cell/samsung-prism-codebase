@@ -1,238 +1,211 @@
+"""Sequential model trials with a wall-clock budget and durable subprocess logs."""
+
+import argparse
 import csv
 import json
 import os
-import re
 import subprocess
 import sys
+import tempfile
+import time
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-TIME_ENCODE = REPO_ROOT / "scripts" / "time_encode.py"
-RUN_EVAL = REPO_ROOT / "experiments" / "run_eval.py"
-METRICS_LOG = REPO_ROOT / "results" / "metrics_log.csv"
-COMPARISON_MD = REPO_ROOT / "results" / "model_comparison.md"
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from src.retrieval.artifacts import atomic_json, create_run
+from src.retrieval.config import REPO_ROOT, load_config, positive_int, repo_path
 
-MAX_PROJECTED_SECONDS = 20 * 60
-
-# Each candidate is run in its own subprocess, one at a time, never
-# concurrently. Running multiple transformer models at once on shared CPU
-# cores makes timing numbers meaningless (they'd all be competing for the
-# same cores) and risks a crash from memory pressure once two or three
-# multi-hundred-MB models are loaded simultaneously. A subprocess per model
-# also guarantees its memory is fully released before the next one loads,
-# which matters after seeing one CPU-bound model's memory climb past 1.5GB
-# during Phase 1. Running sequentially with no manual step between models
-# gets the "don't babysit each one" outcome without that risk.
 CANDIDATES = [
-    ("configs/jina_code_embeddings_0_5b.json", "phase1_jina_code_embeddings_0_5b"),
-    ("configs/granite_embedding_english_r2.json", "phase1_granite_embedding_english_r2"),
-    ("configs/e5_base_v2.json", "phase1_e5_base_v2"),
-]
-
-# Already computed in an earlier run (see results/minilm_l6_v2/ and
-# metrics_log.csv) — included here for the comparison table, not re-run.
-EXISTING_RESULTS = [
-    {
-        "model": "sentence-transformers/all-MiniLM-L6-v2",
-        "status": "ok",
-        "ndcg_at_10": 0.06596,
-        "mrr": 0.05581,
-        "encode_seconds": 80.74445525021292,
-        "seconds_per_1k_docs": 9.21214549346411,
-        "notes": "baseline, from earlier run",
-    }
+    "configs/jina_code_embeddings_0_5b.json",
+    "configs/granite_embedding_english_r2.json",
+    "configs/e5_base_v2.json",
 ]
 
 
-def build_env():
-    env = os.environ.copy()
-    env["PYTHONPATH"] = str(REPO_ROOT)
-    # HF_HUB_ENABLE_HF_TRANSFER is a no-op in this huggingface_hub version
-    # (downloads always go through its Xet backend now). That Xet backend
-    # stalled indefinitely on this machine even with HF_TOKEN set, so
-    # downloads are forced onto the plain HTTPS path instead, which was
-    # confirmed reliable earlier in this project.
-    env["HF_HUB_DISABLE_XET"] = "1"
-    return env
+def completed_results(root):
+    """Retain historical scores and hardware metadata without rerunning old models."""
+    rows = []
+    legacy = root / "metrics_log.csv"
+    if legacy.exists():
+        with legacy.open(newline="", encoding="utf-8") as stream:
+            for row in csv.DictReader(stream):
+                rows.append(
+                    {
+                        "model": row["model"],
+                        "status": "complete",
+                        "device": row["device"],
+                        "ndcg_at_10": float(row["ndcg_at_10"]),
+                        "mrr_at_10": float(row["mrr"]),
+                        "evaluation_seconds": float(row["encode_seconds"]),
+                        "corpus_encode_seconds": None,
+                        "source": f"legacy:{row['experiment_id']}",
+                        "notes": row["notes"],
+                    }
+                )
+    for path in sorted((root / "runs").glob("*/run.json")):
+        run = json.loads(path.read_text())
+        if run["status"] == "complete":
+            summary = json.loads((path.parent / "summary.json").read_text())
+            rows.append(
+                {
+                    **summary,
+                    "status": "complete",
+                    "source": str(path.parent.relative_to(root)),
+                    "notes": "",
+                }
+            )
+    return rows
 
 
-def run_subprocess(cmd, env, timeout):
-    return subprocess.run(
-        cmd, cwd=REPO_ROOT, env=env, capture_output=True, text=True, timeout=timeout
-    )
+def write_comparison_table(rows, destination):
+    def number(value):
+        return "—" if value is None else f"{value:.5f}"
 
-
-def short_error(result, exc=None):
-    if exc is not None:
-        return f"{type(exc).__name__}: {exc}"
-    tail = [line for line in result.stderr.strip().splitlines() if line.strip()]
-    return tail[-1] if tail else f"exit code {result.returncode} (no stderr)"
-
-
-def with_retry(fn, *args, **kwargs):
-    try:
-        return fn(*args, **kwargs)
-    except Exception as e:
-        print(f"  first attempt failed ({e}); retrying once...", flush=True)
-        return fn(*args, **kwargs)
-
-
-def check_timing(config_path, env):
-    result = run_subprocess(
-        [sys.executable, str(TIME_ENCODE), "--config", config_path],
-        env=env,
-        timeout=1200,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(short_error(result))
-    match = re.search(r"Projected full-corpus encode time: ([\d.]+) s", result.stdout)
-    if not match:
-        raise RuntimeError("could not parse projected time from time_encode.py output")
-    return float(match.group(1))
-
-
-def read_last_metrics_row(experiment_id):
-    with open(METRICS_LOG, newline="") as f:
-        rows = list(csv.DictReader(f))
-    for row in reversed(rows):
-        if row["experiment_id"] == experiment_id:
-            return row
-    raise RuntimeError(f"no metrics_log.csv row found for experiment_id={experiment_id}")
-
-
-def run_full_eval(config_path, experiment_id, model_slug, env):
-    result = run_subprocess(
-        [sys.executable, str(RUN_EVAL), "--config", config_path, "--experiment-id", experiment_id],
-        env=env,
-        timeout=3600,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(short_error(result))
-
-    results_path = REPO_ROOT / "results" / model_slug / "appsretrieval_results.json"
-    with open(results_path) as f:
-        data = json.load(f)
-    scores = data["scores"]["test"][0]
-
-    metrics_row = read_last_metrics_row(experiment_id)
-
-    return {
-        "ndcg_at_10": scores["ndcg_at_10"],
-        "mrr": scores["mrr_at_10"],
-        "encode_seconds": float(metrics_row["encode_seconds"]),
-        "seconds_per_1k_docs": float(metrics_row["seconds_per_1k_docs"]),
-    }
-
-
-def fmt(value, digits=5):
-    return f"{value:.{digits}f}" if isinstance(value, (int, float)) else "—"
-
-
-def write_comparison_table(rows):
-    def sort_key(row):
-        return row["ndcg_at_10"] if isinstance(row["ndcg_at_10"], (int, float)) else -1
-
-    rows_sorted = sorted(rows, key=sort_key, reverse=True)
+    def escape(value):
+        return str(value).replace("|", "\\|").replace("\n", " ")
 
     lines = [
         "# Model comparison — AppsRetrieval",
         "",
-        "| model | status | NDCG@10 | MRR | encode_seconds | seconds_per_1k_docs | notes |",
-        "|---|---|---|---|---|---|---|",
+        "Historical timings include the entire evaluation. Corpus-only timings are available for new runs. Compare speed only on matched hardware.",
+        "",
+        "| model | status | device | NDCG@10 | MRR@10 | evaluation_seconds | corpus_encode_seconds | source | notes |",
+        "|---|---|---|---|---|---|---|---|---|",
     ]
-    for row in rows_sorted:
-        lines.append(
-            f"| {row['model']} | {row['status']} | {fmt(row['ndcg_at_10'])} | "
-            f"{fmt(row['mrr'])} | {fmt(row['encode_seconds'], 2)} | "
-            f"{fmt(row['seconds_per_1k_docs'], 2)} | {row['notes']} |"
-        )
+    for row in sorted(
+        rows,
+        key=lambda r: r.get("ndcg_at_10") if r.get("ndcg_at_10") is not None else -1,
+        reverse=True,
+    ):
+        values = [
+            row["model"],
+            row["status"],
+            row.get("device", "unknown"),
+            number(row.get("ndcg_at_10")),
+            number(row.get("mrr_at_10")),
+            number(row.get("evaluation_seconds")),
+            number(row.get("corpus_encode_seconds")),
+            row.get("source", ""),
+            row.get("notes", ""),
+        ]
+        lines.append("| " + " | ".join(map(escape, values)) + " |")
+    destination = Path(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(dir=destination.parent, prefix=".comparison-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write("\n".join(lines) + "\n")
+        os.replace(temporary, destination)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
 
-    COMPARISON_MD.write_text("\n".join(lines) + "\n")
-    print(f"Wrote {COMPARISON_MD}")
+
+def run_subprocess(command, log_path, timeout):
+    # Stream to disk: progress and full tracebacks survive failures and timeouts.
+    with Path(log_path).open("w", encoding="utf-8") as stream:
+        env = os.environ.copy()
+        env.setdefault("HF_HUB_DISABLE_XET", "1")
+        return subprocess.run(
+            command,
+            cwd=REPO_ROOT,
+            env=env,
+            stdout=stream,
+            stderr=subprocess.STDOUT,
+            timeout=timeout,
+        ).returncode
 
 
-def main():
-    print(f"HF_TOKEN is set: {'yes' if os.environ.get('HF_TOKEN') else 'no'}")
-
-    env = build_env()
-    rows = list(EXISTING_RESULTS)
-
-    for config_path, experiment_id in CANDIDATES:
-        with open(REPO_ROOT / config_path) as f:
-            config = json.load(f)
-        model_name = config["model_name"]
-        model_slug = Path(config_path).stem
-        print(f"\n=== {model_name} ===", flush=True)
-
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--configs", nargs="+", default=CANDIDATES)
+    parser.add_argument("--budget-seconds", type=positive_int, default=7200)
+    parser.add_argument("--max-projected-seconds", type=positive_int, default=1200)
+    parser.add_argument("--results-root", default="results")
+    parser.add_argument("--comparison-only", action="store_true")
+    args = parser.parse_args(argv)
+    root = repo_path(args.results_root)
+    if args.comparison_only:
+        write_comparison_table(completed_results(root), root / "model_comparison.md")
+        return 0
+    batch = create_run(root / "batches", "candidates")
+    deadline = time.monotonic() + args.budget_seconds
+    attempts = []
+    failed = False
+    for index, config_path in enumerate(args.configs):
+        attempt = {
+            "config": config_path,
+            "status": "failed",
+            "model": config_path,
+            "source": str(batch),
+        }
+        print(f"Evaluating {config_path}; logs: {batch}", flush=True)
         try:
-            projected_seconds = with_retry(check_timing, config_path, env)
-        except Exception as e:
-            print(f"  FAILED (timing check): {e}", flush=True)
-            rows.append(
-                {
-                    "model": model_name,
-                    "status": "failed",
-                    "ndcg_at_10": None,
-                    "mrr": None,
-                    "encode_seconds": None,
-                    "seconds_per_1k_docs": None,
-                    "notes": f"failed — {e}",
-                }
+            config = load_config(config_path)
+            attempt["model"] = config["model_name"]
+            if time.monotonic() >= deadline:
+                raise TimeoutError("Total batch budget exhausted")
+            timing_path = batch / f"{index}-timing.json"
+            code = run_subprocess(
+                [
+                    sys.executable,
+                    str(REPO_ROOT / "scripts/time_encode.py"),
+                    "--config",
+                    config_path,
+                    "--output",
+                    str(timing_path),
+                ],
+                batch / f"{index}-timing.log",
+                min(1200, deadline - time.monotonic()),
             )
-            continue
-
-        print(f"  projected full-corpus encode time: {projected_seconds:.1f}s", flush=True)
-
-        if projected_seconds > MAX_PROJECTED_SECONDS:
-            print("  SKIPPED — too slow", flush=True)
-            rows.append(
-                {
-                    "model": model_name,
-                    "status": "skipped",
-                    "ndcg_at_10": None,
-                    "mrr": None,
-                    "encode_seconds": None,
-                    "seconds_per_1k_docs": None,
-                    "notes": f"skipped — too slow (projected {projected_seconds:.0f}s)",
-                }
-            )
-            continue
-
-        try:
-            result = with_retry(run_full_eval, config_path, experiment_id, model_slug, env)
-        except Exception as e:
-            print(f"  FAILED (full eval): {e}", flush=True)
-            rows.append(
-                {
-                    "model": model_name,
-                    "status": "failed",
-                    "ndcg_at_10": None,
-                    "mrr": None,
-                    "encode_seconds": None,
-                    "seconds_per_1k_docs": None,
-                    "notes": f"failed — {e}",
-                }
-            )
-            continue
-
-        print(
-            f"  OK — NDCG@10={result['ndcg_at_10']}, MRR@10={result['mrr']}",
-            flush=True,
-        )
-        rows.append(
-            {
-                "model": model_name,
-                "status": "ok",
-                "ndcg_at_10": result["ndcg_at_10"],
-                "mrr": result["mrr"],
-                "encode_seconds": result["encode_seconds"],
-                "seconds_per_1k_docs": result["seconds_per_1k_docs"],
-                "notes": "",
-            }
-        )
-
-    write_comparison_table(rows)
+            if code:
+                raise RuntimeError(
+                    f"Timing process exited {code}; see {index}-timing.log"
+                )
+            timing = json.loads(timing_path.read_text())
+            attempt["device"] = timing["resolved_config"]["device"]
+            if timing["projected_corpus_seconds"] > args.max_projected_seconds:
+                attempt.update(
+                    status="skipped",
+                    notes="Projected corpus encoding exceeds configured threshold",
+                )
+                failed = True
+            else:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("Total batch budget exhausted")
+                code = run_subprocess(
+                    [
+                        sys.executable,
+                        str(REPO_ROOT / "experiments/run_eval.py"),
+                        "--config",
+                        config_path,
+                        "--experiment-id",
+                        Path(config_path).stem,
+                        "--output-root",
+                        str(root / "runs"),
+                    ],
+                    batch / f"{index}-evaluation.log",
+                    min(3600, remaining),
+                )
+                if code:
+                    raise RuntimeError(
+                        f"Evaluation process exited {code}; see {index}-evaluation.log"
+                    )
+                attempt["status"] = "complete"
+        except (
+            OSError,
+            ValueError,
+            RuntimeError,
+            subprocess.TimeoutExpired,
+            TimeoutError,
+        ) as exc:
+            failed = True
+            attempt["notes"] = str(exc)
+        attempts.append(attempt)
+        atomic_json(batch / "attempts.json", attempts)
+    rows = completed_results(root) + [r for r in attempts if r["status"] != "complete"]
+    write_comparison_table(rows, root / "model_comparison.md")
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

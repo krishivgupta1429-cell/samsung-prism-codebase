@@ -9,6 +9,8 @@ IMPORTS = [
     "from mteb.models.abs_encoder import AbsEncoder",
     "from mteb.models.model_meta import ModelMeta",
     "from mteb.types import PromptType",
+    "from sentence_transformers import SentenceTransformer",
+    "import torch",
 ]
 
 
@@ -49,7 +51,7 @@ def main():
         print(f"  name: {task.metadata.name}")
         print(f"  description: {task.metadata.description}")
     except Exception as e:
-        print(f"  FAILED to load task 'AppsRetrieval'")
+        print("  FAILED to load task 'AppsRetrieval'")
         print(f"    {type(e).__name__}: {e}")
         ok = False
     print()

@@ -1,0 +1,14 @@
+# Isolated ONNX environment: optimum-onnx 0.1.0 requires Transformers <4.58,
+# while the main environment's Sentence Transformers 6.1 requires >=5.
+# Install the matching CPU torch build first on Linux, as in README.md.
+mteb==2.21.8
+sentence-transformers==5.1.2
+transformers==4.57.6
+torch==2.14.0
+numpy==2.4.6
+filelock==4.0.5
+optimum==2.1.0
+optimum-onnx[onnxruntime]==0.1.0
+onnxruntime==1.30.0
+onnx==1.23.1
+pytest==9.1.1

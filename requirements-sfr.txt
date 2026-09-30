@@ -1,0 +1,8 @@
+# Separate environment for Salesforce/SFR-Embedding-Code-400M_R remote code.
+mteb==2.21.8
+sentence-transformers==3.4.1
+transformers==4.49.0
+torch==2.14.0
+numpy==2.4.6
+filelock==4.0.5
+pytest==9.1.1
