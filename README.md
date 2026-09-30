@@ -34,13 +34,38 @@ built around exactly this split:
 - **Query encoding happens per request and is what must stay fast on CPU**
   for the system to be usable.
 
-Caveat: we have verified this distinction architecturally (MTEB times
-"Encoding corpus" and "Encoding queries" as separate phases) and via the
-dramatic NDCG@10 gain, but we have **not yet directly measured
-jina-code-embeddings-0.5b's single-query CPU encoding latency in isolation**
-— every CPU timing check run so far (`scripts/time_encode.py`) sampled
-documents from the corpus, not queries. That's a recommended follow-up
-before treating full CPU-side compliance as proven.
+We closed the loop on this: measured single-query CPU latency directly (20
+real queries, one at a time) and it was **not** fast — avg 4,382 ms/query.
+Corpus-encoding being a one-time cost doesn't help if a single live query
+also takes 4+ seconds on CPU. See "Serving: quantized model" below for how
+this is actually handled.
+
+## Serving: quantized model vs. official benchmark score
+
+This project uses **two versions of the same model** for two different
+purposes:
+
+- **Official benchmark score — full precision:** NDCG@10 **0.84083**, MRR@10
+  **0.81055**, measured with `experiments/run_eval.py` on the full
+  8,765-document APPS test corpus (`results/jina_code_embeddings_0_5b/`).
+  This is the number reported for the hackathon submission.
+- **Live query-time serving — INT8 ONNX quantized:** single-query CPU
+  latency dropped from **avg 4,382 ms** (full precision) to **avg 450 ms**
+  (~9.7x faster; min 113 ms, max 1,069 ms) via dynamic INT8 quantization
+  (`experiments/export_quantized_onnx.py`, ONNX Runtime, `arm64` preset). A
+  scoped sanity check (300 sample queries against a 500-document pool, not
+  the full corpus) showed NDCG@10 0.87636 with no sign of accuracy collapse
+  — not directly comparable to the 0.84083 full-corpus score since a 500-doc
+  pool is an easier task, but sufficient to confirm quantization didn't break
+  retrieval quality.
+
+The quantized model binary (497MB) is not committed to git (GitHub rejects
+files over 100MB without Git LFS); `experiments/export_quantized_onnx.py`
+regenerates it exactly, in a separate isolated venv (`sentence-transformers[onnx]`
++ `optimum`/`onnxruntime`, kept out of the main `.venv`). See
+`docs/progress.md` for the full writeup, including a real ONNX Runtime
+warm-up-cost characteristic worth knowing about before deploying it (a
+production service needs one warm-up inference at startup).
 
 ## Setup
 

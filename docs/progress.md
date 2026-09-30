@@ -347,6 +347,97 @@ pretraining, which none of the general-purpose text encoders tried in Phase 1
 updated to reflect this as the current model and to state the corpus/query
 reasoning and its open caveat.
 
-Next: awaiting direction on Phase 2/3 (query cleaning, hybrid search,
-reranking) built on top of `jina-code-embeddings-0.5b`, or on closing out the
-single-query CPU latency follow-up first.
+## Phase 1 (continued): closed out the single-query CPU latency follow-up
+
+Closed out the open caveat above: measured `jina-code-embeddings-0.5b`'s
+actual single-query CPU latency (20 real queries, one at a time, `batch_size=1`,
+one untimed warm-up call excluded from the stats):
+
+- **min 1,121.3 ms / avg 4,382.1 ms / max 9,396.0 ms**
+
+Not comfortably fast — 4+ seconds average is a real problem for live
+query-time serving, not just a theoretical corpus-encoding cost. This
+disproves the earlier "corpus is one-time, queries are fine" assumption for
+*this specific model as-is*: the model is too large (0.5B, decoder
+architecture) for its own per-query forward pass to be CPU-fast, independent
+of corpus size.
+
+**Response: ONNX INT8 dynamic quantization**, via
+`experiments/export_quantized_onnx.py` (requires a separate, isolated venv —
+`sentence-transformers[onnx]` pulls in `optimum`/`onnxruntime`, deliberately
+kept out of the main `.venv`; the main `.venv` was never touched and was
+re-verified after — `check_env.py` exits 0, `pytest -q` passes). Exported via
+`sentence_transformers.backend.export_dynamic_quantized_onnx_model(model,
+"arm64", ...)` (arm64 preset, this machine's CPU architecture), producing a
+497MB `model_qint8_arm64.onnx` (roughly half the original bf16 size — dynamic
+quantization only quantizes weight matrices, not the full model).
+
+One real snag: the exported graph requires `position_ids` as an explicit
+input (Qwen2 uses RoPE), which sentence-transformers' tokenizer doesn't
+produce and the original PyTorch model computed internally when absent — that
+fallback isn't preserved by tracing. Fixed by monkeypatching the ONNX model's
+forward to compute `position_ids` from `attention_mask` before delegating to
+the real forward (see `patch_position_ids()` in the export script).
+
+**Quantized single-query CPU latency** (identical methodology, same 20
+queries):
+
+- **min 113.0 ms / avg 449.7 ms / max 1,068.6 ms — a ~9.7x speedup**, now
+  mostly under a second. This is the number that matters for live serving.
+
+**Scoped accuracy sanity check** (300 randomly-sampled queries — not the full
+3,765 — against a 500-document pool: their 300 gold-answer documents plus 200
+random distractors, not the full 8,765-document corpus):
+
+- **NDCG@10: 0.87636, MRR@10: 0.84623**
+
+No accuracy collapse from quantization — that was the actual purpose of this
+check. **Important caveat: this number is not directly comparable to the
+official benchmark score (0.84083).** A 500-candidate pool that's guaranteed
+to contain every correct answer is a much easier ranking task than the full
+8,765-document corpus, so 0.876 here reflects an easier task, not a claim
+that quantization *improved* accuracy. A true apples-to-apples comparison
+would need the same query sample run against the full corpus with both
+model versions.
+
+Along the way, discovered a real ONNX Runtime characteristic worth recording:
+the very first inference batch at a new/largest sequence shape pays a one-time
+graph/memory-arena initialization cost that can dominate a short run's total
+time (a 16-batch corpus-pool encode showed batch 1 taking 34.5 minutes and
+the remaining 15 batches taking under 2 minutes combined). The single-query
+latency measurements above are unaffected because they include an explicit
+untimed warm-up call before measuring — exactly the practice that absorbs
+this cost. **A production deployment needs one warm-up inference at
+startup**; without it, the very first real query would pay this one-time
+cost.
+
+The quantized model binary (497MB) is **not committed to git** — GitHub
+rejects pushes of files over 100MB without Git LFS, which this repo doesn't
+use, and a 500MB binary isn't appropriate to carry in ordinary git history
+for a hackathon submission. Instead, `experiments/export_quantized_onnx.py`
+reproduces it exactly, and `configs/jina_code_embeddings_0_5b_int8_onnx.json`
+documents the serving-time config (file name, provider, prefixes,
+`max_seq_length`, the position_ids caveat). Regenerating it takes roughly the
+time reported above (base export + quantization, a few minutes) plus the
+corpus/query encode times if re-validating.
+
+**Two-tier model setup, going forward:**
+
+- **Official benchmark score: the full-precision `jina-code-embeddings-0.5b`,
+  NDCG@10 0.84083, MRR@10 0.81055** — measured on the full 8,765-document
+  APPS test corpus (`results/jina_code_embeddings_0_5b/`). This is the number
+  reported for the hackathon submission.
+- **Live query-time serving: the INT8 ONNX quantized version** — ~450ms
+  average single-query CPU latency, ~9.7x faster than full precision, with a
+  scoped sanity check showing no sign of accuracy collapse. This is what an
+  actual deployed/demo system should use for encoding incoming queries.
+  Corpus embeddings (computed once, offline, with either model version) are
+  reused across queries either way, per the corpus/query architecture
+  discussion above.
+
+`README.md` updated to reflect this two-tier setup.
+
+**Phase 1 is now complete**, including the CPU-serving-latency follow-up.
+
+Next: awaiting direction on Phase 2 (error analysis) or Phase 3 (hybrid
+search + reranking) on top of `jina-code-embeddings-0.5b`.
